@@ -1,0 +1,6 @@
+appname="swaggit"
+version="0.0.1"
+genesisfile="genesis.json"
+VAULT_ADDR="http://127.0.0.1:8200"
+VAULT_KEY="Y8A1iPZXBZCcYkE9oTbGx/IFfT/H1hv2XekP5bCpMck="
+VAULT_TOKEN="s.08mvD42jY88v7jMox440gRmv"
