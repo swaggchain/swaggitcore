@@ -26,12 +26,11 @@ import (
 	CHKSUM (SIZE - 10) uint32
 
 
- */
+*/
 
 type p2pMessage []byte
 
 type MessageType uint16
-
 
 const (
 	_ MessageType = iota
@@ -82,17 +81,16 @@ func (m MessageType) String() string {
 	}
 }
 
-
 type MessagePackets struct {
-	chainID uint32
-	msgType MessageType
-	version uint16
-	size uint32
-	checksum uint32
-	isCompressed uint16
-	isEncrypted uint16
+	chainID        uint32
+	msgType        MessageType
+	version        uint16
+	size           uint32
+	checksum       uint32
+	isCompressed   uint16
+	isEncrypted    uint16
 	specialRouting uint16
-	data []byte
+	data           []byte
 }
 
 func (p *p2pMessage) Encode(m *MessagePackets) *p2pMessage {
@@ -101,7 +99,7 @@ func (p *p2pMessage) Encode(m *MessagePackets) *p2pMessage {
 	if m.isCompressed > 0 {
 		m.data = snappy.Encode(nil, m.data)
 	}
-	content := make([]byte, 18 + len(m.data))
+	content := make([]byte, 22+len(m.data))
 	binary.BigEndian.PutUint32(content, m.chainID)
 	binary.BigEndian.PutUint16(content[4:6], uint16(m.msgType))
 	binary.BigEndian.PutUint16(content[6:8], m.version)
@@ -195,13 +193,12 @@ func DecodeRawMessage(rawBytes []byte) (*MessagePackets, error) {
 
 	return m, nil
 
-
 }
 
 type IncomingMessage struct {
 	from peer.ID
 	data []byte
-	typ MessageType
+	typ  MessageType
 }
 
 func NewIncomingMessage(peerID peer.ID, data []byte, messageType MessageType) *IncomingMessage {
@@ -222,10 +219,14 @@ func (m *IncomingMessage) Type() MessageType {
 func newP2PMessage(chainID uint32, typ MessageType, cflag uint16, data []byte) *p2pMessage {
 	p2pm := new(p2pMessage)
 	msg := p2pm.Encode(&MessagePackets{
-		chainID:chainID,
-		msgType: typ,
+		chainID:      chainID,
+		msgType:      typ,
 		isCompressed: cflag,
-		data: data,
+		data:         data,
 	})
 	return msg
+}
+
+func (p *p2pMessage) Data() (*MessagePackets, error) {
+	return DecodeRawMessage(p.raw())
 }

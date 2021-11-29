@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/golang/protobuf/proto"
 	"github.com/libp2p/go-libp2p-core/host"
 	libnet "github.com/libp2p/go-libp2p-core/network"
 	"github.com/libp2p/go-libp2p-core/peer"
@@ -16,14 +17,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
+
 	kbucket "github.com/libp2p/go-libp2p-kbucket"
 	multiaddr "github.com/multiformats/go-multiaddr"
 	madns "github.com/multiformats/go-multiaddr-dns"
-	"time"
+	netpb "swagg/services/network/pb"
 	_ "swagg/services/types"
+	"sync"
+	"time"
 )
-
 
 var (
 	dumpRoutingTableInterval = 5 * time.Minute
@@ -55,7 +57,7 @@ const (
 )
 
 type NetworkManager struct {
-	neighbors map[peer.ID]*Peer
+	neighbors     map[peer.ID]*Peer
 	neighborCount map[connDirection]int
 	neighborMutex sync.RWMutex
 
@@ -65,55 +67,54 @@ type NetworkManager struct {
 	quitCh  chan struct{}
 	started atomic.Int32
 
-	host host.Host
-	config *NetConfig
-	routingTable *kbucket.RoutingTable
-	peerStore peerstore.Peerstore
-	lastUpdateTime atomic.Int64
-	wg *sync.WaitGroup
-	blockProducers []peer.ID
+	host             host.Host
+	config           *NetConfig
+	routingTable     *kbucket.RoutingTable
+	peerStore        peerstore.Peerstore
+	lastUpdateTime   atomic.Int64
+	wg               *sync.WaitGroup
+	blockProducers   []peer.ID
 	blockProducersMu sync.RWMutex
-	validators []peer.ID
-	validatorsMu sync.RWMutex
-	blackListPID map[string]bool
-	blackListIP map[string]bool
-	blackListMu sync.RWMutex
-	retryTimes map[string]int
-	rtMutex sync.RWMutex
+	validators       []peer.ID
+	validatorsMu     sync.RWMutex
+	blackListPID     map[string]bool
+	blackListIP      map[string]bool
+	blackListMu      sync.RWMutex
+	retryTimes       map[string]int
+	rtMutex          sync.RWMutex
 }
 
 type NetConfig struct {
-	ListenAddr string
-	SeedNodes []string
-	ChainID uint32
-	Version uint16
-	DataPath string
-	InboundConn int
+	ListenAddr   string
+	SeedNodes    []string
+	ChainID      uint32
+	Version      uint16
+	DataPath     string
+	InboundConn  int
 	OutboundConn int
-	BlackIP []string
-	BlackPID []string
-	AdminPort string
+	BlackIP      []string
+	BlackPID     []string
+	AdminPort    string
 }
-
 
 func NewNetworkManager(host host.Host, config *NetConfig) *NetworkManager {
 
-	routingTable, _ := kbucket.NewRoutingTable(1000, kbucket.ConvertPeerID(host.ID()), time.Second, host.Peerstore(),  time.Minute, nil)
+	routingTable, _ := kbucket.NewRoutingTable(1000, kbucket.ConvertPeerID(host.ID()), time.Second, host.Peerstore(), time.Minute, nil)
 
 	nm := &NetworkManager{
-		neighbors: make(map[peer.ID]*Peer),
+		neighbors:     make(map[peer.ID]*Peer),
 		neighborCount: make(map[connDirection]int),
-		neighborCap: make(map[connDirection]int),
-		subs: new(sync.Map),
-		quitCh: make(chan struct{}),
-		routingTable: routingTable,
-		host: host,
-		config: config,
-		peerStore: host.Peerstore(),
-		wg: new(sync.WaitGroup),
-		blackListPID: make(map[string]bool),
-		blackListIP: make(map[string]bool),
-		retryTimes: make(map[string]int),
+		neighborCap:   make(map[connDirection]int),
+		subs:          new(sync.Map),
+		quitCh:        make(chan struct{}),
+		routingTable:  routingTable,
+		host:          host,
+		config:        config,
+		peerStore:     host.Peerstore(),
+		wg:            new(sync.WaitGroup),
+		blackListPID:  make(map[string]bool),
+		blackListIP:   make(map[string]bool),
+		retryTimes:    make(map[string]int),
 	}
 
 	return nm
@@ -132,14 +133,11 @@ func (nm *NetworkManager) Start() {
 	go nm.dumpRoutingTableLoop()
 	go nm.syncRoutingTableLoop()
 	go nm.metricsStatLoop()
-	go nm.findBPLoop()
-
+	go nm.findBlockProducerLoop()
 
 }
 
-
 func (nm *NetworkManager) Stop() {
-
 
 	if !nm.started.CAS(1, 0) {
 		return
@@ -195,15 +193,15 @@ func (nm *NetworkManager) findBlockProducerLoop() {
 		select {
 		case <-nm.quitCh:
 			return
-			case <-time.After(findBPInterval):
-				unknownBPs := make([]string, 0)
-				for _, id := range nm.getBlockProducers() {
-					if len(nm.peerStore.Addrs(id) )== 0 {
-						unknownBPs = append(unknownBPs, id.Pretty())
-					}
+		case <-time.After(findBPInterval):
+			unknownBPs := make([]string, 0)
+			for _, id := range nm.getBlockProducers() {
+				if len(nm.peerStore.Addrs(id)) == 0 {
+					unknownBPs = append(unknownBPs, id.Pretty())
 				}
-				nm.routingQuery(unknownBPs)
-				nm.connectBPs()
+			}
+			nm.routingQuery(unknownBPs)
+			nm.connectBlockProducers()
 		}
 	}
 
@@ -264,11 +262,11 @@ func (nm *NetworkManager) HandleStream(s libnet.Stream, direction connDirection)
 				if len(bytes) > 0 {
 					msg := p2pm.Encode(
 						&MessagePackets{
-							chainID:nm.config.ChainID,
-						msgType:RoutingTableResponse, version:nm.config.Version, isCompressed:1, isEncrypted:0, data:bytes})
+							chainID: nm.config.ChainID,
+							msgType: RoutingTableResponse, version: nm.config.Version, isCompressed: 1, isEncrypted: 0, data: bytes})
 					s.Write(msg.raw())
 				}
-				time.AfterFunc(time.Second, func() {s.Conn().Close()})
+				time.AfterFunc(time.Second, func() { s.Conn().Close() })
 			} else {
 				s.Conn().Close()
 			}
@@ -285,13 +283,13 @@ func (nm *NetworkManager) dumpRoutingTableLoop() {
 	var lastSaveTime int64
 	for {
 		select {
-			case <-nm.quitCh:
-				return
-				case <-time.After(dumpRoutingTableInterval):
-					if lastSaveTime < nm.lastUpdateTime.Load() {
-						nm.DumpRoutingTable()
-						lastSaveTime = time.Now().Unix()
-					}
+		case <-nm.quitCh:
+			return
+		case <-time.After(dumpRoutingTableInterval):
+			if lastSaveTime < nm.lastUpdateTime.Load() {
+				nm.DumpRoutingTable()
+				lastSaveTime = time.Now().Unix()
+			}
 		}
 	}
 }
@@ -304,9 +302,9 @@ func (nm *NetworkManager) syncRoutingTableLoop() {
 		select {
 		case <-nm.quitCh:
 			return
-			case <-time.After(syncRoutingTableInterval):
-				pid, _ := randomPID()
-				nm.routingQuery([]string{pid.Pretty()})
+		case <-time.After(syncRoutingTableInterval):
+			pid, _ := randomPID()
+			nm.routingQuery([]string{pid.Pretty()})
 		}
 	}
 }
@@ -317,11 +315,19 @@ func (nm *NetworkManager) metricsStatLoop() {
 		select {
 		case <-nm.quitCh:
 			return
-			case <-time.After(metricsStatInterval):
-				neighborCountGauge.Set(float64(nm.AllNeighborCount()), nil)
-				routingCountGauge.Set(float64(nm.routingTable.Size()), nil)
+		case <-time.After(metricsStatInterval):
+			// TODO metrics
+			//	neighborCountGauge.Set(float64(nm.AllNeighborCount()), nil)
+			//	routingCountGauge.Set(float64(nm.routingTable.Size()), nil)
 		}
 	}
+}
+
+func (nm *NetworkManager) AllNeighborCount() int {
+	nm.neighborMutex.RLock()
+	defer nm.neighborMutex.RUnlock()
+
+	return len(nm.neighbors)
 }
 
 func (nm *NetworkManager) storePeerInfo(peerID peer.ID, addrs []multiaddr.Multiaddr) {
@@ -476,7 +482,7 @@ func (nm *NetworkManager) LoadRoutingTable() {
 			log.Warnf("could not parse multiaddr err =%v, str=%v", err, line)
 			continue
 		}
-		if peerID = nm.host.ID() {
+		if peerID == nm.host.ID() {
 			continue
 		}
 		nm.storePeerInfo(peerID, []multiaddr.Multiaddr{addr})
@@ -489,7 +495,7 @@ func (nm *NetworkManager) routingQuery(ids []string) {
 		return
 	}
 
-	query := &RoutingQuery{ids}
+	query := &netpb.RoutingQuery{Ids: ids}
 	bytes, err := json.Marshal(query)
 	if err != nil {
 		panic(err)
@@ -554,7 +560,7 @@ func (nm *NetworkManager) parseSeeds() {
 					log.Info("retry resolve dns")
 					err := nm.dnsResolve(peerID, addr)
 					if err != nil {
-						return 
+						return
 					}
 				})
 			}
@@ -643,11 +649,11 @@ func (nm *NetworkManager) getRoutingResponse(peerIDs []string) ([]byte, error) {
 
 	}
 
-	resp := &RoutingResponse{}
+	resp := &netpb.RoutingResponse{}
 	for pid := range pidSet {
 		info := nm.peerStore.PeerInfo(pid)
 		if len(info.Addrs) > 0 {
-			peerInfo := &PeerInfo{Id: info.ID.Pretty()}
+			peerInfo := &netpb.PeerInfo{Id: info.ID.Pretty()}
 
 			for _, addr := range info.Addrs {
 				if isPublicMaddr(addr.String()) {
@@ -666,37 +672,249 @@ func (nm *NetworkManager) getRoutingResponse(peerIDs []string) ([]byte, error) {
 
 	}
 
-	selfInfo := &PeerInfo{Id: nm.host.ID().Pretty()}
+	selfInfo := &netpb.PeerInfo{Id: nm.host.ID().Pretty()}
 	for _, addr := range nm.host.Addrs() {
 		selfInfo.Addrs = append(selfInfo.Addrs, addr.String())
 	}
 	resp.Peers = append(resp.Peers, selfInfo)
 
-	bytes, _ := json.Marshal(resp)
+	bytes, _ := proto.Marshal(resp)
 	return bytes, nil
 }
 
 func (nm *NetworkManager) handleRoutingTableQuery(msg *p2pMessage, from peer.ID) {
 	data := msg.rawData()
-	query := &RoutingQuery{}
+	query := &netpb.RoutingQuery{}
 	err := json.Unmarshal(data, query)
 	if err != nil {
 		return
 	}
 
-	queryIDs := query.Ids()
+	queryIDs := query.GetIds()
+	bytes, _ := nm.getRoutingResponse(queryIDs)
+	if len(bytes) > 0 {
+		nm.SendToPeer(from, bytes, RoutingTableResponse, UrgentMessage)
+	}
 
 }
 
-type RoutingQuery struct {
-	Ids []string
+func (nm *NetworkManager) handleRoutingTableResponse(msg *p2pMessage, from peer.ID) {
+	data, _ := msg.Data()
+	resp := &netpb.RoutingResponse{}
+	err := proto.Unmarshal(data.data, resp)
+	if err != nil {
+		log.Errorf("Decoding pb failed. err=%v, bytes=%v", err, data)
+		return
+	}
+	log.Debugf("Receiving peer infos: %v, from=%v", resp, from.Pretty())
+
+	for _, peerInfo := range resp.Peers {
+		if len(peerInfo.Addrs) > 0 {
+			pid, err := peer.Decode(peerInfo.Id)
+			if err != nil {
+				log.Warnf("Decoding peerID failed. err=%v, id=%v", err, peerInfo.Id)
+				continue
+			}
+
+			if nm.isDead(pid) || nm.isPIDBlack(pid) {
+				continue
+			}
+
+			if pid == nm.host.ID() {
+				continue
+			}
+
+			if nm.GetNeighbor(pid) != nil && from != pid {
+				continue
+			}
+
+			addrs := make([]string, 0, len(peerInfo.Addrs))
+			if from != pid {
+				for _, addr := range peerInfo.Addrs {
+					if isPublicMaddr(addr) {
+						addrs = append(addrs, addr)
+					}
+				}
+			} else {
+				var port string
+				var hasPublicMaddr bool
+				for _, addr := range peerInfo.Addrs {
+					if isPublicMaddr(addr) {
+						addrs = append(addrs, addr)
+						hasPublicMaddr = true
+					} else {
+						port = addr[strings.LastIndex(addr, "/")+1:]
+					}
+				}
+
+				if !hasPublicMaddr {
+					neighbor := nm.GetNeighbor(pid)
+					if neighbor != nil {
+						remoteAddr := neighbor.addr.String()
+						remoteListenAddr := remoteAddr[:strings.LastIndex(remoteAddr, "/")+1] + port
+						addrs = append(addrs, remoteListenAddr)
+
+					}
+				}
+			}
+
+			maddrs := make([]multiaddr.Multiaddr, 0, len(addrs))
+			for _, addr := range addrs {
+				ma, err := multiaddr.NewMultiaddr(addr)
+				if err != nil {
+					log.Warnf("Parsing multiaddr failed. err=%v, addr=%v", err, addr)
+					continue
+				}
+				maddrs = append(maddrs, ma)
+			}
+
+			if len(maddrs) > maxAddrCount {
+				maddrs = maddrs[:maxAddrCount]
+			}
+			if len(maddrs) > 0 {
+				nm.storePeerInfo(pid, maddrs)
+			}
+		}
+	}
+
 }
 
-type RoutingResponse struct {
-	Peers []*PeerInfo
+func (nm *NetworkManager) HandleMessage(msg *p2pMessage, peerID peer.ID) {
+	data, err := msg.Data()
+	if err != nil {
+		log.Errorf("get message data failed. err=%v", err)
+		return
+	}
+
+	switch msg.msgType() {
+	case RoutingTableQuery:
+		go nm.handleRoutingTableQuery(msg, peerID)
+	case RoutingTableResponse:
+		go nm.handleRoutingTableResponse(msg, peerID)
+	default:
+		inMsg := NewIncomingMessage(peerID, data.data, msg.msgType())
+		if m, exist := nm.subs.Load(msg.msgType()); exist {
+			m.(*sync.Map).Range(func(k, v interface{}) bool {
+				select {
+				case v.(chan IncomingMessage) <- *inMsg:
+				default:
+					log.Warnf("sending incoming message failed. type=%s", msg.msgType())
+
+				}
+				return true
+
+			})
+		}
+	}
 }
 
-type PeerInfo struct {
-	Id string
-	Addrs []string
+func (nm *NetworkManager) NeighborStat() map[string]interface{} {
+	ret := make(map[string]interface{})
+
+	blackIPs := make([]string, 0)
+	blackPIDs := make([]string, 0)
+	nm.blackListMu.RLock()
+	for ip := range nm.blackListIP {
+		blackIPs = append(blackIPs, ip)
+	}
+	for id := range nm.blackListPID {
+		blackPIDs = append(blackPIDs, id)
+	}
+	nm.blackListMu.RUnlock()
+	ret["black_ips"] = blackIPs
+	ret["black_ids"] = blackPIDs
+
+	in := make([]string, 0)
+	out := make([]string, 0)
+
+	for _, p := range nm.GetAllNeighbors() {
+		addr := p.addr.String() + "/ipfs/" + p.ID()
+		if p.direction == inbound {
+			in = append(in, addr)
+		} else {
+			out = append(out, addr)
+		}
+	}
+
+	ret["neighbors"] = map[string]interface{}{
+		"outbound": out,
+		"inbound":  in,
+	}
+	ret["neighbor_count"] = map[string]interface{}{
+		"outbound": nm.NeighborCount(outbound),
+		"inbound":  nm.NeighborCount(inbound),
+	}
+
+	ret["bp"] = nm.getBlockProducers()
+	return ret
+}
+
+func (nm *NetworkManager) PutPeerToBlack(id string) {
+	pid, err := peer.Decode(id)
+	if err != nil {
+		log.Warnf("decode peerID failed. err=%v, id=%v", err, id)
+		return
+	}
+	nm.RemoveNeighbor(pid)
+	nm.PutPIDToBlack(pid)
+	nm.deletePeerInfo(pid)
+}
+
+func (nm *NetworkManager) PutPIDToBlack(pid peer.ID) {
+	nm.blackListMu.Lock()
+	nm.blackListPID[pid.Pretty()] = true
+	nm.blackListMu.Unlock()
+	for _, ma := range nm.peerStore.Addrs(pid) {
+		ip := getIPFromMaddr(ma.String())
+		if len(ip) > 0 {
+			nm.PutIPToBlack(ip)
+		}
+	}
+
+}
+
+func (nm *NetworkManager) PutIPToBlack(ip string) {
+	nm.blackListMu.Lock()
+	nm.blackListIP[ip] = true
+	nm.blackListMu.Unlock()
+}
+
+func (nm *NetworkManager) isStreamBlack(s libnet.Stream) bool {
+	pid := s.Conn().RemotePeer()
+	nm.blackListMu.RLock()
+	defer nm.blackListMu.RUnlock()
+
+	if nm.blackListPID[pid.Pretty()] {
+		return true
+	}
+	ma := s.Conn().RemoteMultiaddr().String()
+	ip := getIPFromMaddr(ma)
+	return nm.blackListIP[ip]
+}
+
+func (nm *NetworkManager) isPIDBlack(pid peer.ID) bool {
+	nm.blackListMu.RLock()
+	defer nm.blackListMu.RUnlock()
+	return nm.blackListPID[pid.Pretty()]
+}
+
+func (nm *NetworkManager) recordDialFail(pid peer.ID) {
+	nm.rtMutex.Lock()
+	defer nm.rtMutex.Unlock()
+
+	nm.retryTimes[pid.Pretty()]++
+}
+
+func (nm *NetworkManager) freshPeer(pid peer.ID) {
+	nm.rtMutex.Lock()
+	defer nm.rtMutex.Unlock()
+
+	delete(nm.retryTimes, pid.Pretty())
+}
+
+func (nm *NetworkManager) isDead(pid peer.ID) bool {
+	nm.rtMutex.RLock()
+	defer nm.rtMutex.RUnlock()
+
+	return nm.retryTimes[pid.Pretty()] > deadPeerRetryTimes
 }

@@ -9,6 +9,7 @@ const (
 	Secp256k1
 	Ed25519
 	RSA
+	P2P
 )
 
 func (a Algorithm) String() string {
@@ -23,6 +24,8 @@ func (a Algorithm) String() string {
 		return "ed25519"
 	case RSA:
 		return "rsa"
+	case P2P:
+		return "p2p"
 
 	default:
 		return "crystal-kyber"

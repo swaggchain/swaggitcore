@@ -2,8 +2,11 @@ package common
 
 import "go.uber.org/atomic"
 
-type P2PConfig struct{}
-
+type P2PConfig struct {
+	DataPath   string
+	AdminPort  string
+	ListenAddr string
+}
 type PathsConfiguration struct {
 	BlocksDirName         string
 	BlockArchiveDirName   string

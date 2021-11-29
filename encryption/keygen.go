@@ -1,8 +1,11 @@
 package encryption
 
 import (
+	"crypto/rand"
 	"errors"
 	dilithium "github.com/kudelskisecurity/crystals-go/crystals-dilithium"
+	"github.com/libp2p/go-libp2p-core/crypto"
+	"os"
 	"swagg/common"
 )
 
@@ -15,8 +18,8 @@ func DecodePubKey(pubKey string) []byte {
 }
 
 type KeyPair struct {
-	Alg Algorithm
-	PubKey []byte
+	Alg     Algorithm
+	PubKey  []byte
 	PrivKey []byte
 }
 
@@ -29,6 +32,8 @@ func CreateNewKeyPair(alg Algorithm) *KeyPair {
 		k.createKyber(nil)
 	case Dilithium:
 		k.createDilithium()
+	case P2P:
+		k.generateP2PKeys()
 	}
 
 	return k
@@ -71,4 +76,63 @@ func (kp *KeyPair) Sign(info []byte) ([]byte, error) {
 	return d.Sign(kp.PrivKey, info), nil
 }
 
+func (kp *KeyPair) generateP2PKeys() {
 
+	privKey, pubKey, _ := crypto.GenerateEd25519Key(rand.Reader)
+	pubB, _ := pubKey.Raw()
+	privB, _ := privKey.Raw()
+	kp.PubKey = pubB
+	kp.PrivKey = privB
+
+}
+
+func (kp *KeyPair) P2PPrivKeyToString() string {
+	return crypto.ConfigEncodeKey(kp.PrivKey)
+}
+
+func (kp *KeyPair) P2PPubKeyToString() string {
+	return string(kp.PubKey)
+}
+
+func (kp *KeyPair) DecodeP2PPrivKey(data string) (crypto.PrivKey, error) {
+	bytes, err := crypto.ConfigDecodeKey(data)
+	if err != nil {
+		return nil, err
+	}
+	return crypto.UnmarshalPrivateKey(bytes)
+}
+
+func (kp *KeyPair) getP2PKeyFromFile(path string) (crypto.PrivKey, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	kp.PrivKey = data
+	return kp.DecodeP2PPrivKey(string(data))
+}
+
+func (kp *KeyPair) writeP2PKeyToFile(path string) error {
+
+	return os.WriteFile(path, []byte(kp.P2PPrivKeyToString()), 0666)
+}
+
+func GetP2PKeys(path string) (crypto.PrivKey, error) {
+
+	k := new(KeyPair)
+	key, err := k.getP2PKeyFromFile(path)
+	if err == nil {
+		return key, nil
+	}
+	k.generateP2PKeys()
+
+	if path != "" {
+
+		err = k.writeP2PKeyToFile(path)
+		if err != nil {
+			return nil, err
+		}
+
+	}
+	return k.DecodeP2PPrivKey(string(k.PrivKey))
+
+}
